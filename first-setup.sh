@@ -46,7 +46,7 @@ fi
 ##############################################
 # 2. Изменение имени хоста
 ##############################################
-NEW_HOSTNAME="vpn-server"   # Задайте нужное имя хоста
+NEW_HOSTNAME="nossobaki-server"   # Задайте нужное имя хоста
 log "INFO" "Изменение имени хоста на $NEW_HOSTNAME..."
 if hostnamectl set-hostname "$NEW_HOSTNAME" >> "$LOGFILE" 2>&1; then
     log "SUCCESS" "Имя хоста успешно изменено на $NEW_HOSTNAME"
