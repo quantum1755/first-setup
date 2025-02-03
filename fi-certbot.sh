@@ -5,10 +5,12 @@
 # 3. Создание пользователей (tetsto с правами sudo и dockeruser)
 # 4. Разрешение IP-форвардинга
 # 5. Проверка и включение BBR
-# 6. Настройка firewall (ufw): установка режима по умолчанию, разрешение портов (22, 49270, 27961, 443)
+# 6. Настройка firewall (ufw): установка режима по умолчанию и разрешение необходимых портов
 # 7. Опциональная блокировка пинга (ICMP Echo Request)
-# 8. Добавление открытого SSH-ключа для пользователей root и tetsto
-# 9. Отключение аутентификации по паролю для SSH
+# 8. Установка и запрос сертификата с помощью certbot для домена nossobaki25.duckdns.org,
+#    а также создание cron-задачи для продления сертификата с временным открытием порта 80
+# 9. Настройка SSH: изменение порта с 22 на 2120, добавление открытого SSH-ключа для root и tetsto,
+#    отключение аутентификации по паролю
 # 10. Вывод итоговой информации с логом выполнения
 
 LOGFILE="/var/log/vpn_setup.log"
@@ -19,6 +21,10 @@ SSH_PUBLIC_KEY="ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQCvqTzJ8rHh5ibhY6zLjEmc0m8Q
 
 # Опция блокировки пинга: если установлено значение "yes", то сервер не будет отвечать на ICMP Echo Request.
 BLOCK_PING="yes"  # установите "no", чтобы оставить пинг включённым
+
+# Домен для сертификата и email администратора (замените email при необходимости)
+DOMAIN="nossobaki25.duckdns.org"
+ADMIN_EMAIL="admin@nossobaki25.duckdns.org"
 
 # Функция логирования
 log() {
@@ -46,7 +52,7 @@ fi
 ##############################################
 # 2. Изменение имени хоста
 ##############################################
-NEW_HOSTNAME="nossobaki-server"   # Задайте нужное имя хоста
+NEW_HOSTNAME="vpn-server"   # Задайте нужное имя хоста
 log "INFO" "Изменение имени хоста на $NEW_HOSTNAME..."
 if hostnamectl set-hostname "$NEW_HOSTNAME" >> "$LOGFILE" 2>&1; then
     log "SUCCESS" "Имя хоста успешно изменено на $NEW_HOSTNAME"
@@ -57,7 +63,6 @@ fi
 ##############################################
 # 3. Создание пользователей
 ##############################################
-# Функция создания пользователя с домашней директорией и принудительной сменой пароля при первом входе
 create_user() {
     local username="$1"
     local sudo_flag="$2"  # Если передано "sudo", то добавить в группу sudo
@@ -83,9 +88,9 @@ create_user() {
     fi
 }
 
-# Создаем пользователя tetsto с правами sudo
+# Создаём пользователя tetsto с правами sudo
 create_user "tetsto" "sudo"
-# Создаем пользователя для других целей (например, dockeruser) – установка Docker не производится
+# Создаём дополнительного пользователя (например, dockeruser)
 create_user "dockeruser" ""
 
 ##############################################
@@ -93,7 +98,7 @@ create_user "dockeruser" ""
 ##############################################
 log "INFO" "Настройка IP-форвардинга..."
 if sysctl -w net.ipv4.ip_forward=1 >> "$LOGFILE" 2>&1; then
-    log "SUCCESS" "IP-форвардинг включен (текущая сессия)"
+    log "SUCCESS" "IP-форвардинг включён (текущая сессия)"
 else
     log "ERROR" "Ошибка при включении IP-форвардинга"
 fi
@@ -141,8 +146,7 @@ fi
 ##############################################
 # 6. Настройка firewall (ufw)
 ##############################################
-log "INFO" "Настройка ufw: установка режима по умолчанию и открытие необходимых портов..."
-
+log "INFO" "Настройка ufw: установка режима по умолчанию и разрешение необходимых портов..."
 # Установка ufw, если он не установлен
 if ! command -v ufw &>/dev/null; then
     if apt-get install -y ufw >> "$LOGFILE" 2>&1; then
@@ -153,13 +157,14 @@ if ! command -v ufw &>/dev/null; then
 fi
 
 # Устанавливаем режимы по умолчанию:
-# Входящий трафик запрещён, исходящий разрешён
+# Входящие соединения запрещены, исходящие разрешены
 ufw default deny incoming >> "$LOGFILE" 2>&1
 ufw default allow outgoing >> "$LOGFILE" 2>&1
 log "SUCCESS" "Режим по умолчанию: входящие соединения запрещены, исходящие разрешены"
 
-# Разрешаем SSH (порт 22) и дополнительные порты: 49270, 27961, 443
-for port in 22 49270 27961 443; do
+# Разрешаем необходимые порты:
+# SSH: 2120, остальные: 49270, 27961, 443
+for port in 2120 49270 27961 443; do
     if ufw allow "$port" >> "$LOGFILE" 2>&1; then
         log "SUCCESS" "Порт $port открыт в ufw"
     else
@@ -167,7 +172,7 @@ for port in 22 49270 27961 443; do
     fi
 done
 
-# Включаем ufw
+# Порт 80 не разрешается постоянно – он будет открываться для certbot
 if ufw --force enable >> "$LOGFILE" 2>&1; then
     log "SUCCESS" "ufw успешно включён"
 else
@@ -179,7 +184,6 @@ fi
 ##############################################
 if [[ "$BLOCK_PING" == "yes" ]]; then
     log "INFO" "Блокировка пинга включена. Добавляю правило для блокировки ICMP Echo Request..."
-    # Добавляем правило для блокировки входящих пингов:
     if iptables -C INPUT -p icmp --icmp-type echo-request -j DROP &>/dev/null; then
         log "INFO" "Правило для блокировки пинга уже существует"
     else
@@ -194,8 +198,69 @@ else
 fi
 
 ##############################################
-# 8. Добавление открытого SSH-ключа для пользователей root и tetsto
+# 8. Установка certbot и запрос сертификата
 ##############################################
+log "INFO" "Установка certbot..."
+if apt-get install -y certbot >> "$LOGFILE" 2>&1; then
+    log "SUCCESS" "certbot успешно установлен"
+else
+    log "ERROR" "Ошибка установки certbot"
+fi
+
+log "INFO" "Запрос сертификата для домена $DOMAIN..."
+# Временное открытие порта 80 для certbot (если правило отсутствует)
+if ! ufw status numbered | grep -q "80/tcp"; then
+    ufw allow 80 >> "$LOGFILE" 2>&1
+    log "INFO" "Временно открыт порт 80 для получения сертификата"
+fi
+
+# Запрос сертификата с использованием standalone-режима
+if certbot certonly --standalone -d "$DOMAIN" --non-interactive --agree-tos -m "$ADMIN_EMAIL" >> "$LOGFILE" 2>&1; then
+    log "SUCCESS" "Сертификат для домена $DOMAIN успешно запрошен"
+else
+    log "ERROR" "Ошибка запроса сертификата для домена $DOMAIN"
+fi
+
+# Закрываем порт 80 после запроса сертификата
+ufw delete allow 80 >> "$LOGFILE" 2>&1
+log "INFO" "Порт 80 закрыт после запроса сертификата"
+
+# Создаём скрипт для продления сертификата с временным открытием порта 80
+CERTBOT_RENEW_SCRIPT="/usr/local/bin/certbot-renew.sh"
+cat > "$CERTBOT_RENEW_SCRIPT" << 'EOF'
+#!/bin/bash
+# Открываем порт 80 для продления сертификата
+ufw allow 80
+# Выполняем продление сертификата
+certbot renew --quiet
+# Закрываем порт 80 после продления
+ufw delete allow 80
+EOF
+chmod +x "$CERTBOT_RENEW_SCRIPT"
+log "SUCCESS" "Скрипт для продления сертификата создан: $CERTBOT_RENEW_SCRIPT"
+
+# Добавляем cron-задачу для продления сертификата (пример: каждый день в 3:00)
+CRON_FILE="/etc/cron.d/certbot-renew"
+cat > "$CRON_FILE" << EOF
+0 3 * * * root $CERTBOT_RENEW_SCRIPT >> /var/log/certbot-renew.log 2>&1
+EOF
+chmod 644 "$CRON_FILE"
+log "SUCCESS" "Cron-задача для продления сертификата добавлена: $CRON_FILE"
+
+##############################################
+# 9. Настройка SSH: изменение порта, установка ключей и отключение аутентификации по паролю
+##############################################
+SSH_CONFIG="/etc/ssh/sshd_config"
+
+# Изменяем порт SSH на 2120: если строка Port уже присутствует, меняем её; иначе добавляем
+if grep -q "^Port" "$SSH_CONFIG"; then
+    sed -i 's/^Port.*/Port 2120/' "$SSH_CONFIG"
+else
+    echo "Port 2120" >> "$SSH_CONFIG"
+fi
+log "SUCCESS" "Порт SSH изменён на 2120 в $SSH_CONFIG"
+
+# Добавление открытого SSH-ключа для пользователей root и tetsto
 add_ssh_key() {
     local username="$1"
     if [ "$username" == "root" ]; then
@@ -225,24 +290,22 @@ add_ssh_key() {
         log "SUCCESS" "SSH-ключ для пользователя $username успешно добавлен"
     fi
 }
-
 add_ssh_key "root"
 add_ssh_key "tetsto"
 
-##############################################
-# 9. Отключение аутентификации по паролю для SSH
-##############################################
-log "INFO" "Отключение аутентификации по паролю для SSH..."
-SSH_CONFIG="/etc/ssh/sshd_config"
+# Отключение аутентификации по паролю
 if grep -q "^#\?PasswordAuthentication" "$SSH_CONFIG"; then
     sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication no/' "$SSH_CONFIG"
 else
     echo "PasswordAuthentication no" >> "$SSH_CONFIG"
 fi
+log "SUCCESS" "Аутентификация по паролю отключена в $SSH_CONFIG"
+
+# Перезагружаем службу SSH для применения изменений
 if systemctl reload sshd >> "$LOGFILE" 2>&1; then
-    log "SUCCESS" "SSH-сервер перезагружен с отключённой аутентификацией по паролю"
+    log "SUCCESS" "SSH-сервер успешно перезагружен"
 else
-    log "ERROR" "Ошибка при перезагрузке SSH-сервера после изменения настроек"
+    log "ERROR" "Ошибка при перезагрузке SSH-сервера"
 fi
 
 ##############################################
