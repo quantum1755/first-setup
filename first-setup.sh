@@ -1,23 +1,24 @@
 #!/bin/bash
-# Скрипт первоначальной настройки VPN-сервера с установкой Docker, настройкой firewall и SSH
-# Действия:
+# Скрипт первоначальной настройки VPN-сервера:
 # 1. Обновление пакетов
 # 2. Изменение имени хоста
-# 3. Создание пользователей (tetsto с правами sudo и dockeruser для Docker)
+# 3. Создание пользователей (tetsto с правами sudo и dockeruser)
 # 4. Разрешение IP-форвардинга
 # 5. Проверка и включение BBR
-# 6. Установка Docker
-# 7. Настройка firewall (ufw) и открытие порта для SSH
-# 8. Добавление пользователя tetsto в группу docker и настройка SSH для разрешения подключения к нему
-# 9. Добавление указанного открытого SSH-ключа для пользователей root и tetsto
-# 10. Отключение аутентификации по паролю для SSH
-# 11. Вывод итоговой информации с логом выполненных операций
+# 6. Настройка firewall (ufw): установка режима по умолчанию, разрешение портов (22, 49270, 27961, 443)
+# 7. Опциональная блокировка пинга (ICMP Echo Request)
+# 8. Добавление открытого SSH-ключа для пользователей root и tetsto
+# 9. Отключение аутентификации по паролю для SSH
+# 10. Вывод итоговой информации с логом выполнения
 
 LOGFILE="/var/log/vpn_setup.log"
 : > "$LOGFILE"  # очищаем лог-файл
 
-# Укажите открытый SSH-ключ, который будет добавлен для пользователей root и tetsto
+# Задайте открытый SSH-ключ, который будет добавлен для пользователей root и tetsto
 SSH_PUBLIC_KEY="ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQCvqTzJ8rHh5ibhY6zLjEmc0m8Q3tVVgd2CLy5LEXWSxV7URoIgKgsryNcL3oaeBy/02C7xSh3npFbwLo1oQ327LLxK7wsNv04Bpd452sT/Nu70wHzQRHJaa9JnI7Ok8G/4ALOxgeaZPYCZBAnwh4mHU0zpw1rW/wiVifMkWgZY8UIQ8JL3+2UtYNXU8MkUpKknBEecWvXmF5SK9vGCGKxBE+3snMEz3j3f+KeWIGtv7c+UBszCTHxEyKZaQe8zcfmJyxTYua13Xr6y3r9qienJjKIi/PnL82k31PLhhc36mLjJeaPApj5RpgzPAZ2HlMjmplVJ0XXRMyOhH8RFsFHl tetsto@ServerLinux"
+
+# Опция блокировки пинга: если установлено значение "yes", то сервер не будет отвечать на ICMP Echo Request.
+BLOCK_PING="yes"  # установите "no", чтобы оставить пинг включённым
 
 # Функция логирования
 log() {
@@ -32,7 +33,9 @@ if [[ $EUID -ne 0 ]]; then
     exit 1
 fi
 
+##############################################
 # 1. Обновление пакетов
+##############################################
 log "INFO" "Начинается обновление пакетов..."
 if apt-get update -y >> "$LOGFILE" 2>&1 && apt-get upgrade -y >> "$LOGFILE" 2>&1; then
     log "SUCCESS" "Пакеты успешно обновлены"
@@ -40,7 +43,9 @@ else
     log "ERROR" "Ошибка при обновлении пакетов"
 fi
 
+##############################################
 # 2. Изменение имени хоста
+##############################################
 NEW_HOSTNAME="vpn-server"   # Задайте нужное имя хоста
 log "INFO" "Изменение имени хоста на $NEW_HOSTNAME..."
 if hostnamectl set-hostname "$NEW_HOSTNAME" >> "$LOGFILE" 2>&1; then
@@ -49,7 +54,9 @@ else
     log "ERROR" "Ошибка при изменении имени хоста"
 fi
 
+##############################################
 # 3. Создание пользователей
+##############################################
 # Функция создания пользователя с домашней директорией и принудительной сменой пароля при первом входе
 create_user() {
     local username="$1"
@@ -78,10 +85,12 @@ create_user() {
 
 # Создаем пользователя tetsto с правами sudo
 create_user "tetsto" "sudo"
-# Создаем пользователя для Docker с именем dockeruser (без sudo)
+# Создаем пользователя для других целей (например, dockeruser) – установка Docker не производится
 create_user "dockeruser" ""
 
+##############################################
 # 4. Разрешение IP-форвардинга
+##############################################
 log "INFO" "Настройка IP-форвардинга..."
 if sysctl -w net.ipv4.ip_forward=1 >> "$LOGFILE" 2>&1; then
     log "SUCCESS" "IP-форвардинг включен (текущая сессия)"
@@ -100,7 +109,9 @@ else
     log "ERROR" "Ошибка при применении настроек IP-форвардинга"
 fi
 
+##############################################
 # 5. Проверка и включение BBR
+##############################################
 log "INFO" "Проверка наличия BBR..."
 CURRENT_CC=$(sysctl net.ipv4.tcp_congestion_control 2>>"$LOGFILE" | awk '{print $3}')
 if [[ "$CURRENT_CC" == "bbr" ]]; then
@@ -127,87 +138,64 @@ else
     fi
 fi
 
-# 6. Установка Docker
-log "INFO" "Начинается установка Docker..."
-if apt-get install -y ca-certificates curl gnupg lsb-release >> "$LOGFILE" 2>&1; then
-    log "SUCCESS" "Установлены зависимости для Docker"
-else
-    log "ERROR" "Ошибка установки зависимостей для Docker"
-fi
+##############################################
+# 6. Настройка firewall (ufw)
+##############################################
+log "INFO" "Настройка ufw: установка режима по умолчанию и открытие необходимых портов..."
 
-if mkdir -p /etc/apt/keyrings >> "$LOGFILE" 2>&1 && \
-   curl -fsSL https://download.docker.com/linux/$(. /etc/os-release && echo "$ID")/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg >> "$LOGFILE" 2>&1; then
-    log "SUCCESS" "Добавлен ключ репозитория Docker"
-else
-    log "ERROR" "Ошибка добавления ключа репозитория Docker"
-fi
-
-ARCH=$(dpkg --print-architecture)
-OS_ID=$(. /etc/os-release && echo "$ID")
-echo "deb [arch=$ARCH signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/$OS_ID $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
-
-if apt-get update -y >> "$LOGFILE" 2>&1; then
-    log "SUCCESS" "Обновлён список пакетов после добавления репозитория Docker"
-else
-    log "ERROR" "Ошибка обновления списка пакетов после добавления репозитория Docker"
-fi
-
-if apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin >> "$LOGFILE" 2>&1; then
-    log "SUCCESS" "Docker успешно установлен"
-else
-    log "ERROR" "Ошибка установки Docker"
-fi
-
-# 7. Настройка firewall (ufw) и открытие порта для SSH
-log "INFO" "Настройка firewall (ufw) и открытие порта для SSH..."
+# Установка ufw, если он не установлен
 if ! command -v ufw &>/dev/null; then
     if apt-get install -y ufw >> "$LOGFILE" 2>&1; then
-        log "SUCCESS" "Установлен ufw"
+        log "SUCCESS" "ufw успешно установлен"
     else
         log "ERROR" "Ошибка установки ufw"
     fi
 fi
 
-if ufw allow ssh >> "$LOGFILE" 2>&1; then
-    log "SUCCESS" "Порт SSH открыт в ufw"
-else
-    log "ERROR" "Ошибка при открытии порта SSH в ufw"
-fi
+# Устанавливаем режимы по умолчанию:
+# Входящий трафик запрещён, исходящий разрешён
+ufw default deny incoming >> "$LOGFILE" 2>&1
+ufw default allow outgoing >> "$LOGFILE" 2>&1
+log "SUCCESS" "Режим по умолчанию: входящие соединения запрещены, исходящие разрешены"
 
+# Разрешаем SSH (порт 22) и дополнительные порты: 49270, 27961, 443
+for port in 22 49270 27961 443; do
+    if ufw allow "$port" >> "$LOGFILE" 2>&1; then
+        log "SUCCESS" "Порт $port открыт в ufw"
+    else
+        log "ERROR" "Ошибка при открытии порта $port в ufw"
+    fi
+done
+
+# Включаем ufw
 if ufw --force enable >> "$LOGFILE" 2>&1; then
-    log "SUCCESS" "ufw успешно включен"
+    log "SUCCESS" "ufw успешно включён"
 else
     log "ERROR" "Ошибка при включении ufw"
 fi
 
-# 8. Добавление пользователя tetsto в группу docker и настройка SSH для разрешения подключения к нему
-log "INFO" "Добавление пользователя tetsto в группу docker..."
-if usermod -aG docker tetsto >> "$LOGFILE" 2>&1; then
-    log "SUCCESS" "Пользователь tetsto успешно добавлен в группу docker"
-else
-    log "ERROR" "Ошибка при добавлении пользователя tetsto в группу docker"
-fi
-
-log "INFO" "Настройка SSH для разрешения подключения пользователя tetsto..."
-SSH_CONFIG="/etc/ssh/sshd_config"
-if grep -q "^AllowUsers" "$SSH_CONFIG"; then
-    if grep -qE "^AllowUsers.*\btetsto\b" "$SSH_CONFIG"; then
-         log "INFO" "Пользователь tetsto уже разрешён для подключения по SSH"
+##############################################
+# 7. Опциональная блокировка пинга (ICMP Echo Request)
+##############################################
+if [[ "$BLOCK_PING" == "yes" ]]; then
+    log "INFO" "Блокировка пинга включена. Добавляю правило для блокировки ICMP Echo Request..."
+    # Добавляем правило для блокировки входящих пингов:
+    if iptables -C INPUT -p icmp --icmp-type echo-request -j DROP &>/dev/null; then
+        log "INFO" "Правило для блокировки пинга уже существует"
     else
-         sed -i "/^AllowUsers/s/$/ tetsto/" "$SSH_CONFIG"
-         log "SUCCESS" "Пользователь tetsto добавлен в директиву AllowUsers"
+        if iptables -A INPUT -p icmp --icmp-type echo-request -j DROP >> "$LOGFILE" 2>&1; then
+            log "SUCCESS" "Правило для блокировки пинга успешно добавлено"
+        else
+            log "ERROR" "Ошибка при добавлении правила для блокировки пинга"
+        fi
     fi
 else
-    echo "AllowUsers tetsto" >> "$SSH_CONFIG"
-    log "SUCCESS" "Директива AllowUsers создана с пользователем tetsto"
-fi
-if systemctl reload sshd >> "$LOGFILE" 2>&1; then
-    log "SUCCESS" "Служба SSH успешно перезагружена"
-else
-    log "ERROR" "Ошибка при перезагрузке службы SSH"
+    log "INFO" "Блокировка пинга отключена. Пинги будут обрабатываться стандартно."
 fi
 
-# 9. Добавление указанного открытого SSH-ключа для пользователей root и tetsto
+##############################################
+# 8. Добавление открытого SSH-ключа для пользователей root и tetsto
+##############################################
 add_ssh_key() {
     local username="$1"
     if [ "$username" == "root" ]; then
@@ -241,9 +229,11 @@ add_ssh_key() {
 add_ssh_key "root"
 add_ssh_key "tetsto"
 
-# 10. Отключение аутентификации по паролю для SSH
+##############################################
+# 9. Отключение аутентификации по паролю для SSH
+##############################################
 log "INFO" "Отключение аутентификации по паролю для SSH..."
-# Отключаем PasswordAuthentication (раскомментируя и меняя значение на no)
+SSH_CONFIG="/etc/ssh/sshd_config"
 if grep -q "^#\?PasswordAuthentication" "$SSH_CONFIG"; then
     sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication no/' "$SSH_CONFIG"
 else
@@ -252,11 +242,12 @@ fi
 if systemctl reload sshd >> "$LOGFILE" 2>&1; then
     log "SUCCESS" "SSH-сервер перезагружен с отключённой аутентификацией по паролю"
 else
-    log "ERROR" "Ошибка при перезагрузке SSH-сервера после отключения аутентификации по паролю"
+    log "ERROR" "Ошибка при перезагрузке SSH-сервера после изменения настроек"
 fi
 
-# 11. Вывод итоговой информации
+##############################################
+# 10. Вывод итоговой информации
+##############################################
 echo -e "\n===== Итоговая информация ====="
 cat "$LOGFILE"
 echo "===== Конец работы скрипта ====="
-
