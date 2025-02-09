@@ -16,4 +16,8 @@ fi
 echo "Копируем ${SSH_ALIAS}:${REMOTE_PATH} -> ${LOCAL_PATH}..."
 rsync -avz --progress -e "ssh" "${SSH_ALIAS}:${REMOTE_PATH}/" "${LOCAL_PATH}/"
 
+# Удаляем резервные копии старше 30 дней
+echo "Удаляем файлы резервных копий старше 30 дней..."
+find "${LOCAL_PATH}" -name '*.tar' -type f -mtime +30 -delete
+
 echo "Копирование завершено!"
