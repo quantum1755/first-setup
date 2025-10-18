@@ -72,15 +72,21 @@ step1() {
         case $opt in
             "Да, заблокировать ping")
                 # Через sysctl
-                run_step "Блокировка ICMP в sysctl" bash -c "echo 'net.ipv4.icmp_echo_ignore_all = 1' >> /etc/sysctl.conf && sysctl -p"
+                run_step "Блокировка ICMP в sysctl" bash -c "
+                    echo 'net.ipv4.icmp_echo_ignore_all = 1' >> /etc/sysctl.conf
+                    sysctl -p
+                "
                 
                 # Через UFW (если используется)
                 if command -v ufw &> /dev/null; then
-                    run_step "Блокировка ICMP в UFW" bash -c "ufw deny proto icmp"
+                    run_step "Блокировка ICMP в UFW" ufw deny proto icmp from any to any
                 fi
                 
                 # Через iptables (дополнительно)
-                run_step "Блокировка ICMP в iptables" bash -c "iptables -A INPUT -p icmp --icmp-type echo-request -j DROP && iptables-save > /etc/iptables/rules.v4"
+                run_step "Блокировка ICMP в iptables" bash -c "
+                    iptables -A INPUT -p icmp --icmp-type echo-request -j DROP
+                    iptables-save > /etc/iptables/rules.v4
+                "
                 
                 log_action "ICMP (ping) заблокирован"
                 break
